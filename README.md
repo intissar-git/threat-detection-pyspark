@@ -5,6 +5,22 @@
 docker run -d -p 27017:27017 --name mongo_db mongo:latest
 ```
 
+### CD to the archive and schrink it a bit for fitting into the memory
+```bash
+cd archive
+
+head -n 10001 train_metadata.csv > temp_meta.csv
+mv temp_meta.csv train_metadata.csv
+
+head -c 95240000 X_train.dat > temp_X.dat
+mv temp_X.dat X_train.dat
+
+head -c 40000 y_train.dat > temp_y.dat
+mv temp_y.dat y_train.dat
+
+rm X_test.dat y_test.dat test_metadata.csv
+```
+
 ### Build your PySpark Image
 ```bash
 docker build -t malware-ai-app .
@@ -12,11 +28,12 @@ docker build -t malware-ai-app .
 
 ### Run the Container with Volume Mapping
 ```bash
-docker run --rm \
+docker run --rm -it \
+  -p 8501:8501 \
   --add-host=host.docker.internal:host-gateway \
-  -v $(pwd)/archive:/app/archive \
-  malware-ai-app
-```
+  malware-ai-app \
+  streamlit run dashboard.py --server.address=0.0.0.0
+  ```
 
 ### Verify the database
 ```bash
@@ -38,3 +55,5 @@ the output should be looking something like this
   "prediction": "malware"
 }
 ```
+
+to see the dashboard access this http://localhost:8501 in your web browser. You should see a form to upload a file for analysis. After uploading a file, the dashboard will display the extracted features and the prediction result (malware or benign).

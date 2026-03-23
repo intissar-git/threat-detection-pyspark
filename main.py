@@ -1,104 +1,74 @@
-import os
-import numpy as np
+import streamlit as st
 import pandas as pd
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, when
-from pyspark.sql.types import StringType, ArrayType, FloatType
-from pyspark.ml.classification import RandomForestClassifier
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-from pyspark.ml.linalg import Vectors, VectorUDT
+from pymongo import MongoClient
 
+# --- Configuration ---
+# Connect to the MongoDB container
 MONGO_URI = "mongodb://host.docker.internal:27017"
 DATABASE_NAME = "cyber_db"
 COLLECTION_NAME = "malware_analysis"
 
-SAMPLE_SIZE = 5000
-FEATURE_DIM = 2381
+st.set_page_config(page_title="Malware Analysis Dashboard", page_icon="🛡️", layout="wide")
 
-def init_spark():
-    return SparkSession.builder \
-        .appName("EmberMalwareDetection") \
-        .config("spark.jars.packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.1.1") \
-        .config("spark.driver.memory", "4g") \
-        .getOrCreate()
+@st.cache_data(ttl=10) # Cache data for 10 seconds to avoid spamming the database
+def load_data():
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        db = client[DATABASE_NAME]
+        collection = db[COLLECTION_NAME]
 
-def load_and_prepare_data(spark):
-    print("1. Chargement du dataset...")
+        # Fetch all documents, excluding the MongoDB '_id' and the raw features array to save memory
+        cursor = collection.find({}, {"_id": 0, "features": 0})
+        data = list(cursor)
 
-    meta_df = spark.read.csv("archive/train_metadata.csv", header=True)
-    print("--- Analyse Exploratoire (Métadonnées) ---")
-    meta_df.groupBy("label").count().show()
+        if data:
+            return pd.DataFrame(data)
+        else:
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur de connexion à MongoDB: {e}")
+        return pd.DataFrame()
 
-    print(f"Loading {SAMPLE_SIZE} samples from .dat files to prevent memory crash...")
-    X_train_raw = np.memmap('archive/X_train.dat', dtype=np.float32, mode='r')
-    X_train_reshaped = X_train_raw.reshape((-1, FEATURE_DIM))[:SAMPLE_SIZE]
-    y_train_raw = np.memmap('archive/y_train.dat', dtype=np.float32, mode='r')[:SAMPLE_SIZE]
+# --- Dashboard UI ---
+st.title("🛡️ Tableau de Bord : Détection de Malwares")
+st.markdown("Visualisation des prédictions générées par le modèle Random Forest (PySpark)[cite: 54].")
 
-    pdf = pd.DataFrame({'label': y_train_raw})
+df = load_data()
 
-    valid_indices = pdf['label'] != -1
-    filtered_labels = pdf[valid_indices]['label'].values
-    filtered_features = X_train_reshaped[valid_indices]
+if df.empty:
+    st.warning("Aucune donnée trouvée. Veuillez d'abord exécuter le script PySpark (main.py) pour peupler la base de données.")
+else:
+    # 1. Key Metrics
+    total_files = len(df)
+    malware_count = len(df[df['prediction'] == 'malware'])
+    benign_count = len(df[df['prediction'] == 'benign'])
+    malware_percentage = (malware_count / total_files) * 100 if total_files > 0 else 0
 
-    spark_data = [
-        (float(label), Vectors.dense(features.tolist()))
-        for label, features in zip(filtered_labels, filtered_features)
-    ]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Fichiers Analysés", total_files)
+    col2.metric("Menaces Détectées (Malware)", malware_count)
+    col3.metric("Fichiers Sains (Benign)", benign_count)
 
-    df = spark.createDataFrame(spark_data, ["label", "features"])
-    return df
+    st.divider()
 
-def train_and_predict(df):
-    print("3. Machine Learning (Random Forest)...")
-    train_data, test_data = df.randomSplit([0.8, 0.2], seed=42)
+    # 2. Visualizations
+    col_chart1, col_chart2 = st.columns(2)
 
-    rf = RandomForestClassifier(labelCol="label", featuresCol="features", numTrees=20)
-    model = rf.fit(train_data)
+    with col_chart1:
+        st.subheader("Répartition des Prédictions")
+        # Count the occurrences of each prediction
+        prediction_counts = df['prediction'].value_counts().reset_index()
+        prediction_counts.columns = ['Prédiction', 'Nombre']
 
-    print("4. Prédictions...")
-    predictions = model.transform(test_data)
+        # Native Streamlit Bar Chart
+        st.bar_chart(prediction_counts, x='Prédiction', y='Nombre', color=["#FF4B4B"])
 
-    evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
-    accuracy = evaluator.evaluate(predictions)
-    print(f"Model Accuracy on test split: {accuracy * 100:.2f}%")
+    with col_chart2:
+        st.subheader("Aperçu des données brutes (MongoDB)")
+        st.dataframe(df.head(10), use_container_width=True)
 
-    print("--- Feature Importance (Top 5 vector indices) ---")
-    importances = model.featureImportances.toArray()
-    top_indices = importances.argsort()[-5:][::-1]
-    for idx in top_indices:
-        print(f"Feature Index {idx}: {importances[idx]:.4f}")
-
-    return predictions
-
-def store_in_mongodb(predictions):
-    print("5. Stockage des résultats dans MongoDB...")
-
-    predictions = predictions.withColumn(
-        "prediction_str",
-        when(col("prediction") == 1.0, "malware").otherwise("benign")
-    )
-
-    vector_to_array_udf = udf(lambda v: v.toArray().tolist(), ArrayType(FloatType()))
-
-    mongo_df = predictions.select(
-        col("label").cast(StringType()).alias("file_id"), # Using label/id placeholder
-        vector_to_array_udf(col("features")).alias("features"),
-        col("prediction_str").alias("prediction")
-    )
-
-    mongo_df.write \
-        .format("mongodb") \
-        .option("spark.mongodb.write.connection.uri", MONGO_URI) \
-        .option("spark.mongodb.write.database", DATABASE_NAME) \
-        .option("spark.mongodb.write.collection", COLLECTION_NAME) \
-        .mode("overwrite") \
-        .save()
-
-    print("Succès : Données stockées dans MongoDB.")
-
-if __name__ == "__main__":
-    spark = init_spark()
-    df = load_and_prepare_data(spark)
-    predictions = train_and_predict(df)
-    store_in_mongodb(predictions)
-    spark.stop()
+    # 3. Security Alert Section
+    if malware_percentage > 50:
+        st.error(f"⚠️ Alerte de Sécurité : {malware_percentage:.1f}% des fichiers analysés sont malveillants !")
+    else:
+        st.success(f"✅ Niveau de menace modéré : {malware_percentage:.1f}% de fichiers malveillants.")

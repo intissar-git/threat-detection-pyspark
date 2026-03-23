@@ -5,15 +5,17 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y default-jdk-headless && apt-get clean
 
 # Set environment variables for Spark
-ENV SPARK_VERSION=3.5.0
 ENV JAVA_HOME=/usr/lib/jvm/default-java
 
-# Install PySpark and MongoDB Connector dependencies
-RUN pip install pyspark==${SPARK_VERSION} pymongo pandas
-
-# Create app directory
+# Create and set the working directory inside the container
 WORKDIR /app
-COPY ./app /app
 
-# Command to run your analysis script
+# Copy the requirements file first and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all the Python scripts (main.py, dashboard.py) into the container
+COPY . /app
+
+# Command to run your analysis script by default
 CMD ["python", "main.py"]
