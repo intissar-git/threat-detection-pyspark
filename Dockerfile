@@ -1,21 +1,21 @@
-# Use a lightweight Python image
-FROM python:3.9-slim
+# Use Debian Bullseye to guarantee Java 11 availability
+FROM python:3.9-slim-bullseye
 
-# Install Java (Required for Apache Spark)
-RUN apt-get update && apt-get install -y default-jdk-headless && apt-get clean
+# Install default-jre (handles CPU architecture automatically) and procps (for the 'ps' command)
+RUN apt-get update && apt-get install -y default-jre-headless procps && apt-get clean
 
-# Set environment variables for Spark
+# Use the universal Debian Java symlink
 ENV JAVA_HOME=/usr/lib/jvm/default-java
 
-# Create and set the working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Copy the requirements file first and install dependencies
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all the Python scripts (main.py, dashboard.py) into the container
+# Copy your scripts
 COPY . /app
 
-# Command to run your analysis script by default
+# Command to run your analysis script
 CMD ["python", "main.py"]
