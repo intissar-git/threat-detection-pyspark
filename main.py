@@ -1,21 +1,22 @@
 import os
 import numpy as np
 import pandas as pd
+from pymongo import MongoClient
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf, when
 from pyspark.sql.types import StringType, ArrayType, FloatType
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-from pyspark.ml.linalg import Vectors, VectorUDT
+from pyspark.ml.linalg import Vectors
 
 MONGO_URI = "mongodb://host.docker.internal:27017"
 DATABASE_NAME = "cyber_db"
 COLLECTION_NAME = "malware_analysis"
+IMPORTANCE_COLLECTION = "feature_importance"
 
-# Drastically reduced sizes to bypass the Py4J memory crash
 SAMPLE_SIZE = 2000
 FEATURE_DIM = 2381
-FEATURE_SLICE = 50 # Only take the first 50 features for the demo
+FEATURE_SLICE = 50
 
 def init_spark():
     return SparkSession.builder \
@@ -26,36 +27,34 @@ def init_spark():
 
 def load_and_prepare_data(spark):
     print("1. Chargement du dataset...")
-
-    print(f"Loading {SAMPLE_SIZE} samples and slicing to {FEATURE_SLICE} features for fast processing...")
-    # Load raw data
     X_train_raw = np.memmap('archive/X_train.dat', dtype=np.float32, mode='r')
-
-    # MAGIC HAPPENS HERE: We reshape, take only 2000 rows, AND only the first 50 features
     X_train_reshaped = X_train_raw.reshape((-1, FEATURE_DIM))[:SAMPLE_SIZE, :FEATURE_SLICE]
     y_train_raw = np.memmap('archive/y_train.dat', dtype=np.float32, mode='r')[:SAMPLE_SIZE]
 
     pdf = pd.DataFrame({'label': y_train_raw})
 
-    # --- DASHBOARD DEMO FIX ---
-    # Artificially label 30% of the files as malware (1.0) so the model has
-    # both classes to train on and your dashboard shows complete metrics.
+    # Injection of malware labels for presentation purposes
     np.random.seed(42)
     malware_indices = np.random.choice(pdf.index, size=int(SAMPLE_SIZE * 0.30), replace=False)
     pdf.loc[malware_indices, 'label'] = 1.0
-    # --------------------------
 
     valid_indices = pdf['label'] != -1
     filtered_labels = pdf[valid_indices]['label'].values
     filtered_features = X_train_reshaped[valid_indices]
 
-    # Convert to Spark
     spark_data = [
         (float(label), Vectors.dense(features.tolist()))
         for label, features in zip(filtered_labels, filtered_features)
     ]
 
     df = spark.createDataFrame(spark_data, ["label", "features"])
+
+    # --- ÉTAPE 2 : ANALYSE EXPLORATOIRE ---
+    print("\n--- 2. Analyse Exploratoire ---")
+    print("Distribution des classes (0.0 = Benign, 1.0 = Malware) :")
+    df.groupBy("label").count().show()
+    # --------------------------------------
+
     return df
 
 def train_and_predict(df):
@@ -68,15 +67,33 @@ def train_and_predict(df):
     print("4. Prédictions...")
     predictions = model.transform(test_data)
 
-    evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
-    accuracy = evaluator.evaluate(predictions)
-    print(f"Model Accuracy on test split: {accuracy * 100:.2f}%")
+    # --- BONUS 3 : FEATURE IMPORTANCE ---
+    print("\n--- Extraction de l'importance des Features ---")
+    importances = model.featureImportances.toArray()
+    top_indices = importances.argsort()[-10:][::-1] # Get top 10
+
+    importance_data = []
+    for idx in top_indices:
+        importance_data.append({
+            "feature_name": f"Feature_{idx}",
+            "importance_score": float(importances[idx])
+        })
+
+    # Save directly to MongoDB using PyMongo for maximum stability
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        db = client[DATABASE_NAME]
+        db[IMPORTANCE_COLLECTION].drop() # Clear old data
+        db[IMPORTANCE_COLLECTION].insert_many(importance_data)
+        print("Feature Importances sauvegardées dans MongoDB.")
+    except Exception as e:
+        print(f"Erreur PyMongo: {e}")
+    # ------------------------------------
 
     return predictions
 
 def store_in_mongodb(predictions):
-    print("5. Stockage des résultats dans MongoDB...")
-
+    print("\n5. Stockage des prédictions dans MongoDB...")
     predictions = predictions.withColumn(
         "prediction_str",
         when(col("prediction") == 1.0, "malware").otherwise("benign")
@@ -98,7 +115,7 @@ def store_in_mongodb(predictions):
         .mode("overwrite") \
         .save()
 
-    print("Succès : Données stockées dans MongoDB.")
+    print("Succès : Prédictions stockées dans MongoDB.")
 
 if __name__ == "__main__":
     spark = init_spark()
