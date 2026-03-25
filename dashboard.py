@@ -74,17 +74,59 @@ with tab2:
         st.info("Aucune donnée d'importance trouvée.")
 
 with tab3:
+    import math
+
+    def calc_entropy(data):
+        if not data: return 0.0
+        freq = {}
+        for b in data:
+            freq[b] = freq.get(b, 0) + 1
+        n = len(data)
+        return -sum((c/n)*math.log2(c/n) for c in freq.values())
+
     st.subheader("Scanner un fichier exécutable (Bonus)")
-    uploaded_file = st.file_uploader("Uploadez un fichier .exe ou .dll pour analyse", type=['exe', 'dll', 'bin'])
+    uploaded_file = st.file_uploader(
+        "Uploadez un fichier .exe ou .dll pour analyse",
+        type=['exe', 'dll', 'bin']
+    )
 
     if uploaded_file is not None:
-        with st.spinner("Extraction des features et analyse via PySpark en cours..."):
-            time.sleep(2) # Simulate processing time
+        with st.spinner("Analyse en cours..."):
+            file_bytes = uploaded_file.read()
+            n = len(file_bytes)
 
-            # Simulate a result based on file size for the demo
-            if uploaded_file.size % 2 == 0:
-                st.error(f"⚠️ Alerte ! Le fichier {uploaded_file.name} est classifié comme MALWARE.")
-                st.json({"entropy": 7.8, "suspicious_imports": True, "prediction": "malware"})
-            else:
-                st.success(f"✅ Le fichier {uploaded_file.name} est SAIN.")
-                st.json({"entropy": 4.2, "suspicious_imports": False, "prediction": "benign"})
+            # ── Extraction des vraies features ──────────────────────────
+            entropy_val  = calc_entropy(file_bytes)
+            has_mz       = file_bytes[:2] == b'MZ'
+            has_pe       = b'PE\x00\x00' in file_bytes[:1024]
+            ratio_null   = file_bytes.count(0) / max(n, 1)
+            ratio_print  = sum(1 for b in file_bytes if 32 <= b <= 126) / max(n, 1)
+
+            # ── Règles de décision réelles ───────────────────────────────
+            risk_score = 0
+            if entropy_val > 7.0:  risk_score += 3   # packing/chiffrement
+            if entropy_val > 6.0:  risk_score += 1
+            if has_mz and has_pe:  risk_score += 1   # exécutable Windows
+            if ratio_null > 0.5:   risk_score -= 1   # beaucoup de zéros → bénin
+            if ratio_print > 0.6:  risk_score -= 1   # beaucoup de texte → bénin
+
+            prediction = "malware" if risk_score >= 3 else "benign"
+
+        # ── Affichage résultat ────────────────────────────────────────────
+        if prediction == "malware":
+            st.error(f"⚠️ Alerte ! Le fichier **{uploaded_file.name}** "
+                     f"est classifié comme **MALWARE**.")
+        else:
+            st.success(f"✅ Le fichier **{uploaded_file.name}** est **SAIN (benign)**.")
+
+        # ── Features extraites ────────────────────────────────────────────
+        st.json({
+            "file_size"          : n,
+            "entropy"            : round(entropy_val, 3),
+            "has_MZ_header"      : has_mz,
+            "has_PE_signature"   : has_pe,
+            "ratio_null_bytes"   : round(ratio_null, 3),
+            "ratio_printable"    : round(ratio_print, 3),
+            "risk_score"         : risk_score,
+            "prediction"         : prediction
+        })
