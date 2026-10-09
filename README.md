@@ -132,10 +132,6 @@ threat-detection-pyspark/
 - Implement proper authentication for the Streamlit dashboard
 - Validate uploaded files before processing
 
-## 📄 License
-
-This project is provided as-is for educational and research purposes.
-
 ## 🤝 Contributing
 
 Contributions are welcome! Feel free to submit issues or pull requests.
